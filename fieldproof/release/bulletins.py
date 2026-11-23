@@ -61,11 +61,14 @@ def current_edition(db: Connection, trial_id: str, market: str) -> int:
     ).fetchone()[0]
 
 
-def permitted_outcome(market_result: dict, reviews: list[dict]) -> tuple[str, str]:
+def permitted_outcome(market_result: dict, reviews: list[dict], scope: str) -> tuple[str, str]:
     if any(item["assessment"] == "object" for item in reviews):
         return "hold", "review_objection"
-    if market_result["recommendation"] != "advance":
-        return "hold", market_result["recommendation"]
+    option = market_result.get("scope_options", {}).get(scope)
+    if option is None or not option["available"]:
+        return "hold", "scope_unavailable"
+    if option["recommendation"] != "advance":
+        return "hold", option["recommendation"]
     endorsers = {item["desk"] for item in reviews if item["assessment"] == "endorse"}
     if endorsers != {"field", "methods"}:
         raise conflict("endorsements_missing", "Field and methods desks must independently endorse")
@@ -96,8 +99,21 @@ def issue(
     result = evidence.get_market(frozen, market)
     if frozen["cut"] != trial.close_cut:
         raise conflict("stale_evidence", "Only the closed trial cut can be issued")
+    option = result.get("scope_options", {}).get(request.scope)
+    if option is None:
+        raise conflict(
+            "scope_unavailable",
+            "The trial does not register this publication scope",
+            details={"requested": request.scope, "supported": result.get("scope")},
+        )
+    if not option["available"] and request.outcome != "hold":
+        raise conflict(
+            "scope_unavailable",
+            "The requested publication scope is not supported by this evidence",
+            details={"requested": request.scope, "supported": result.get("scope")},
+        )
     reviews = list_reviews(db, trial.trial_id, request.evidence_id, market)
-    outcome, reason = permitted_outcome(result, reviews)
+    outcome, reason = permitted_outcome(result, reviews, request.scope)
     if request.outcome != outcome:
         raise conflict("outcome_mismatch", "Requested outcome conflicts with evidence or reviews",
                        details={"permitted_outcome": outcome, "reason": reason})
@@ -107,6 +123,9 @@ def issue(
         "edition": edition + 1,
         "outcome": outcome,
         "decision_reason": reason,
+        "scope": request.scope,
+        "supported_weight_bp": option["supported_weight_bp"],
+        "scope_options": result.get("scope_options", {}),
         "evidence_id": request.evidence_id,
         "cut": frozen["cut"],
         "window": frozen["window"],

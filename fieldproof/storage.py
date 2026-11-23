@@ -29,6 +29,20 @@ CREATE TABLE IF NOT EXISTS enrollment (
     PRIMARY KEY (trial_id, unit_id),
     FOREIGN KEY (trial_id, site_id) REFERENCES site(trial_id, site_id)
 );
+CREATE TABLE IF NOT EXISTS candidate (
+    trial_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (trial_id, candidate_id)
+);
+CREATE TABLE IF NOT EXISTS invitation (
+    trial_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','accepted','withdrawn')),
+    data TEXT NOT NULL,
+    PRIMARY KEY (trial_id, candidate_id),
+    FOREIGN KEY (trial_id, candidate_id) REFERENCES candidate(trial_id, candidate_id)
+);
 CREATE TABLE IF NOT EXISTS delivery (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     trial_id TEXT NOT NULL REFERENCES trial(trial_id),
@@ -83,7 +97,7 @@ CREATE TABLE IF NOT EXISTS bulletin (
     UNIQUE (trial_id, market, evidence_id),
     FOREIGN KEY (trial_id, evidence_id) REFERENCES evidence(trial_id, evidence_id)
 );
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 """
 
 
@@ -94,7 +108,7 @@ class Store:
         session = self.connect()
         try:
             version = session.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError(f"Unsupported database version {version}")
             session.execute("PRAGMA journal_mode=WAL")
             session.executescript(SCHEMA)

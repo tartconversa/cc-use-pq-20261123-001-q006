@@ -44,6 +44,19 @@ class Roster:
             arms[unit.arm] += 1
         return counts
 
+    def channel_split_counts(self) -> dict:
+        counts: dict[str, dict] = {}
+        for unit in self.units.values():
+            market, cell = self.placement(unit)
+            channel = unit.channel_id or ""
+            arms = (
+                counts.setdefault(market, {})
+                .setdefault(cell, {})
+                .setdefault(channel, {"standard": 0, "assisted": 0})
+            )
+            arms[unit.arm] += 1
+        return counts
+
 
 def get_trial(db: Connection, trial_id: str) -> Trial:
     row = db.execute("SELECT * FROM trial WHERE trial_id=?", (trial_id,)).fetchone()
@@ -143,16 +156,58 @@ def validate_unit(plan: TrialPlan, sites: dict[str, Site], unit: Enrollment):
         raise invalid("unplanned_cell", f"Unit {unit.unit_id} has no planned cell")
     if unit.active_from < plan.starts_on or unit.active_until > plan.ends_before:
         raise invalid("enrollment_window", f"Unit {unit.unit_id} falls outside the trial")
+    cell = next(
+        (
+            cell
+            for cell in market.cells
+            if cell.climate == site.climate and cell.load == unit.load
+        ),
+        None,
+    )
+    if cell is not None and cell.channels is not None:
+        if unit.channel_id is None:
+            raise invalid(
+                "channel_required",
+                f"Unit {unit.unit_id} must state its recruitment channel",
+            )
+        if unit.channel_id not in cell.channel_ids:
+            raise invalid(
+                "unplanned_channel",
+                f"Unit {unit.unit_id} names a channel outside the plan",
+            )
+    elif unit.channel_id is not None:
+        raise invalid(
+            "channel_unplanned",
+            f"Unit {unit.unit_id} names a channel but its cell has none",
+        )
 
 
 def revise_plan(db: Connection, trial: Trial, plan: TrialPlan, expected: int) -> Trial:
     check_version(trial, expected)
     require_phase(trial, "draft")
+    from fieldproof.design import recruitment
+
     existing = roster(db, trial.trial_id)
     for site in existing.sites.values():
         validate_site(plan, site)
     for unit in existing.units.values():
         validate_unit(plan, existing.sites, unit)
+    for candidate in recruitment.candidate_map(db, trial.trial_id).values():
+        market, cell = recruitment.cell_definition(
+            plan, existing, candidate.site_id, candidate.load
+        )
+        if not recruitment.channels_registered(cell):
+            raise invalid(
+                "channels_unplanned",
+                f"Candidate {candidate.candidate_id} would lose its recruitment channels",
+            )
+        missing = sorted(set(candidate.channels) - set(cell.channel_ids))
+        if missing:
+            raise invalid(
+                "unplanned_channel",
+                f"Candidate {candidate.candidate_id} would lose a planned channel",
+                details={"channels": missing},
+            )
     db.execute(
         "UPDATE trial SET design=?, version=version+1 WHERE trial_id=?",
         (encoded(plan.model_dump(mode="json")), trial.trial_id),
@@ -219,31 +274,55 @@ def enroll(db: Connection, trial: Trial, units: list[Enrollment]) -> dict:
 def open_trial(db: Connection, trial: Trial, expected: int) -> Trial:
     check_version(trial, expected)
     require_phase(trial, "draft")
-    counts = roster(db, trial.trial_id).split_counts()
-    gaps = []
-    minimum = trial.plan.policy.required_units_per_arm
-    for market in trial.plan.markets:
-        for cell in market.cells:
-            sizes = counts.get(market.market_id, {}).get(cell.key, {})
-            for arm in ("standard", "assisted"):
-                count = sizes.get(arm, 0)
-                if count < minimum:
-                    gaps.append(
-                        {
-                            "market": market.market_id,
-                            "cell": cell.key,
-                            "arm": arm,
-                            "enrolled": count,
-                            "required": minimum,
-                        }
-                    )
-    if gaps:
-        raise conflict("allocation_shortfall", "Planned arms are understaffed", details=gaps)
+    from fieldproof.design import recruitment
+
+    pending = recruitment.pending_invitations(db, trial.trial_id)
+    if pending:
+        raise conflict(
+            "invitations_pending",
+            "Resolve outstanding invitations before opening the trial",
+            details=[item.candidate_id for item in pending],
+        )
+    shortfall = []
+    if any(market.has_channels for market in trial.plan.markets):
+        shortfall = recruitment.recruitment_readout(db, trial)["gaps"]
+        shortfall = [gap for gap in shortfall if gap["channel"] is not None]
+        for market in trial.plan.markets:
+            for cell in market.cells:
+                if cell.channels is not None:
+                    continue
+                shortfall.extend(
+                    _pooled_shortfall(db, trial, market, cell)
+                )
+    else:
+        for market in trial.plan.markets:
+            for cell in market.cells:
+                shortfall.extend(_pooled_shortfall(db, trial, market, cell))
+    if shortfall:
+        raise conflict(
+            "allocation_shortfall", "Planned arms are understaffed", details=shortfall
+        )
     db.execute(
         "UPDATE trial SET phase='open', version=version+1 WHERE trial_id=?",
         (trial.trial_id,),
     )
     return get_trial(db, trial.trial_id)
+
+
+def _pooled_shortfall(db: Connection, trial: Trial, market, cell) -> list[dict]:
+    minimum = trial.plan.policy.required_units_per_arm
+    sizes = roster(db, trial.trial_id).split_counts().get(market.market_id, {}).get(cell.key, {})
+    return [
+        {
+            "market": market.market_id,
+            "cell": cell.key,
+            "arm": arm,
+            "enrolled": sizes.get(arm, 0),
+            "required": minimum,
+        }
+        for arm in ("standard", "assisted")
+        if sizes.get(arm, 0) < minimum
+    ]
 
 
 def close_trial(db: Connection, trial: Trial, expected: int, cut: int) -> Trial:

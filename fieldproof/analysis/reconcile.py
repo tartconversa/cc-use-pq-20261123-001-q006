@@ -64,15 +64,23 @@ def market_changes(before: dict, after: dict) -> list[dict]:
             for previous, cell in zip(old["cells"], new["cells"], strict=True)
             if previous != cell
         ]
-        if metrics or gates or cells or old["integrity"] != new["integrity"]:
+        scope_changed = old.get("scope") != new.get("scope")
+        coverage_changed = old.get("target_coverage") != new.get("target_coverage")
+        if (metrics or gates or cells or scope_changed or coverage_changed
+                or old["integrity"] != new["integrity"]):
             results.append(
                 {
                     "market_id": old["market_id"],
                     "before_recommendation": old["recommendation"],
                     "after_recommendation": new["recommendation"],
+                    "before_scope": old.get("scope"),
+                    "after_scope": new.get("scope"),
+                    "scope_changed": scope_changed,
                     "metrics": metrics,
                     "gates": gates,
                     "changed_cells": cells,
+                    "target_coverage": new.get("target_coverage")
+                    if coverage_changed else None,
                 }
             )
     return results
@@ -113,18 +121,54 @@ def reconcile(
 def csv_metrics(evidence: dict) -> str:
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\r\n")
-    writer.writerow((
-        "evidence_id", "cut", "market_id", "cell", "metric", "unit", "standard",
-        "assisted", "assisted_minus_standard", "relative_change_bp",
-    ))
+    legacy = not any(
+        entry.get("channel") is not None
+        for market in evidence["market_results"]
+        for cell in market["cells"]
+        for entry in cell.get("channels", [])
+    )
+    if legacy:
+        column_names = (
+            "evidence_id", "cut", "market_id", "cell", "metric", "unit", "standard",
+            "assisted", "assisted_minus_standard", "relative_change_bp",
+        )
+    else:
+        column_names = (
+            "evidence_id", "cut", "market_id", "cell", "channel", "scope", "metric",
+            "unit", "standard", "assisted", "assisted_minus_standard",
+            "relative_change_bp",
+        )
+    writer.writerow(column_names)
     for market in evidence["market_results"]:
-        rows = [("", market["metrics"])]
-        rows += [(cell["cell"], cell["metrics"]) for cell in market["cells"]]
-        for cell, metrics in rows:
+        scope = market.get("scope", "full")
+        channel_plan = any(
+            entry.get("channel") is not None
+            for cell in market["cells"]
+            for entry in cell.get("channels", [])
+        )
+        blocks = [("", None, market["metrics"])]
+        if scope == "restricted" and "supported_metrics" in market:
+            blocks = [("", None, market["supported_metrics"])]
+        blocks += [(cell["cell"], None, cell["metrics"]) for cell in market["cells"]]
+        if channel_plan:
+            for cell in market["cells"]:
+                for entry in cell.get("channels", []):
+                    blocks.append((cell["cell"], entry["channel"], entry["metrics"]))
+        for cell, channel, metrics in blocks:
             for metric, values in metrics.items():
-                writer.writerow((
-                    evidence["evidence_id"], evidence["cut"], market["market_id"],
-                    cell, metric, values["unit"], values["standard"], values["assisted"],
-                    values["assisted_minus_standard"], values.get("relative_change_bp"),
-                ))
+                if legacy:
+                    writer.writerow((
+                        evidence["evidence_id"], evidence["cut"], market["market_id"],
+                        cell, metric, values["unit"], values["standard"],
+                        values["assisted"], values["assisted_minus_standard"],
+                        values.get("relative_change_bp"),
+                    ))
+                else:
+                    writer.writerow((
+                        evidence["evidence_id"], evidence["cut"], market["market_id"],
+                        cell, channel or "", scope, metric, values["unit"],
+                        values["standard"], values["assisted"],
+                        values["assisted_minus_standard"],
+                        values.get("relative_change_bp"),
+                    ))
     return output.getvalue()

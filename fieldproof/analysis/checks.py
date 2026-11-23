@@ -8,6 +8,7 @@ from sqlite3 import Connection
 from fieldproof.analysis.cohorts import ARMS
 from fieldproof.analysis.evidence import Material
 from fieldproof.common import missing
+from fieldproof.design.contracts import channel_unit_targets
 from fieldproof.design.registry import Trial, roster
 from fieldproof.signals.cycles import Cycle
 
@@ -118,21 +119,41 @@ def local_dates(start: date, stop: date):
         yield start + timedelta(days=offset)
 
 
+def _calendar_key(cell, item) -> tuple:
+    return (cell.key, item.channel, item.arm) if cell.channels is not None else (cell.key, item.arm)
+
+
 def readiness_calendar(db: Connection, trial: Trial, material: Material, market_id: str) -> dict:
     market = trial.plan.market(market_id)
     if market is None:
         raise missing("market", market_id)
     assigned = roster(db, trial.trial_id)
     units = {item.unit_id: item for item in material.units.values() if item.market == market_id}
-    populations = Counter((item.cell, item.arm) for item in units.values())
     policy = trial.plan.policy
-    progress = {
-        (cell.key, arm): CoverageProgress(
-            populations[cell.key, arm], policy.required_units_per_arm,
-            policy.required_cycles_per_unit, policy.minimum_unit_coverage_bp,
-        )
-        for cell in market.cells for arm in ARMS
-    }
+    entries = {cell.key: cell for cell in market.cells}
+    progress: dict[tuple, CoverageProgress] = {}
+    for cell in market.cells:
+        if cell.channels is not None:
+            targets = channel_unit_targets(
+                policy.required_units_per_arm,
+                [(item.channel_id, item.weight_bp) for item in cell.channels],
+            )
+            for channel_id, required in targets.items():
+                for arm in ARMS:
+                    progress[(cell.key, channel_id, arm)] = CoverageProgress(
+                        0, required, policy.required_cycles_per_unit,
+                        policy.minimum_unit_coverage_bp,
+                    )
+        else:
+            for arm in ARMS:
+                progress[(cell.key, arm)] = CoverageProgress(
+                    0, policy.required_units_per_arm, policy.required_cycles_per_unit,
+                    policy.minimum_unit_coverage_bp,
+                )
+    for item in units.values():
+        key = _calendar_key(entries[item.cell], item)
+        if key in progress:
+            progress[key].population += 1
     cycles_by_date: dict[date, list[Cycle]] = defaultdict(list)
     for cycle in material.cycles:
         if cycle.unit_id in units and cycle.usable and material.window.contains(cycle.day):
@@ -140,7 +161,7 @@ def readiness_calendar(db: Connection, trial: Trial, material: Material, market_
     enrollment_edges = defaultdict(Counter)
     for unit_id, item in units.items():
         unit = assigned.units[unit_id]
-        key = item.cell, item.arm
+        key = _calendar_key(entries[item.cell], item)
         enrollment_edges[max(unit.active_from, material.window.start)][key] += 1
         enrollment_edges[min(unit.active_until, material.window.end)][key] -= 1
     active = Counter()
@@ -148,12 +169,13 @@ def readiness_calendar(db: Connection, trial: Trial, material: Material, market_
     for day in local_dates(material.window.start, material.window.end):
         active.update(enrollment_edges[day])
         for cycle in cycles_by_date[day]:
-            unit = units[cycle.unit_id]
-            progress[unit.cell, unit.arm].tally(cycle)
-        days.append({
-            "local_date": day.isoformat(),
-            "cells": [
-                {
+            item = units[cycle.unit_id]
+            key = _calendar_key(entries[item.cell], item)
+            progress[key].tally(cycle)
+        cell_payloads = []
+        for cell in market.cells:
+            if cell.channels is None:
+                cell_payloads.append({
                     "cell": cell.key,
                     "arms": {
                         arm: {
@@ -162,8 +184,23 @@ def readiness_calendar(db: Connection, trial: Trial, material: Material, market_
                         }
                         for arm in ARMS
                     },
-                }
-                for cell in market.cells
-            ],
-        })
+                })
+            else:
+                cell_payloads.append({
+                    "cell": cell.key,
+                    "channels": {
+                        item.channel_id: {
+                            "weight_bp": item.weight_bp,
+                            "arms": {
+                                arm: {
+                                    "active_on_date": active[cell.key, item.channel_id, arm],
+                                    **progress[cell.key, item.channel_id, arm].status(),
+                                }
+                                for arm in ARMS
+                            },
+                        }
+                        for item in cell.channels
+                    },
+                })
+        days.append({"local_date": day.isoformat(), "cells": cell_payloads})
     return {"market_id": market_id, "cut": material.cut, "window": material.window.payload(), "days": days}

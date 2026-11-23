@@ -12,16 +12,20 @@ from fieldproof.analysis import evidence, influence, reconcile, sensitivity
 from fieldproof.analysis.checks import inspection_queue, readiness_calendar
 from fieldproof.analysis.contrast import estimate
 from fieldproof.common import Problem, conflict, missing
-from fieldproof.design import registry
+from fieldproof.design import recruitment, registry
 from fieldproof.design.contracts import (
+    AcceptInvitation,
     AdvancePhase,
+    Candidates,
     Enrollment,
     Enrollments,
     Input,
+    Invitations,
     Key,
     NewTrial,
     ReviseTrial,
     Site,
+    WithdrawInvitation,
 )
 from fieldproof.release import bulletins
 from fieldproof.release.contracts import Cut, EvidenceId, FreezeEvidence, IssueBulletin, Review
@@ -111,13 +115,71 @@ def create_app(database: str | Path) -> FastAPI:
     @app.get("/trials/{trial_id}/roster")
     def read_roster(trial_id: Key):
         with store.transaction() as db:
-            registry.get_trial(db, trial_id)
+            trial = registry.get_trial(db, trial_id)
             assigned = registry.roster(db, trial_id)
-            return {
+            payload = {
                 "sites": list(assigned.sites.values()),
                 "units": list(assigned.units.values()),
                 "allocation": assigned.split_counts(),
             }
+            if any(market.has_channels for market in trial.plan.markets):
+                payload["channel_allocation"] = assigned.channel_split_counts()
+            return payload
+
+    @app.post("/trials/{trial_id}/candidates")
+    def register_candidates(trial_id: Key, body: Candidates):
+        with store.transaction(write=True) as db:
+            trial = registry.get_trial(db, trial_id)
+            return recruitment.register_candidates(db, trial, body.candidates)
+
+    @app.get("/trials/{trial_id}/candidates")
+    def read_candidates(trial_id: Key):
+        with store.transaction() as db:
+            registry.get_trial(db, trial_id)
+            candidates = recruitment.candidate_map(db, trial_id)
+            invites = {item.candidate_id: item for item in
+                       recruitment.invitations(db, trial_id)}
+            return {
+                "candidates": [
+                    {
+                        **candidate.model_dump(mode="json"),
+                        "invitation": invites[candidate_id].payload()
+                        if candidate_id in invites else None,
+                    }
+                    for candidate_id, candidate in candidates.items()
+                ]
+            }
+
+    @app.post("/trials/{trial_id}/invitations")
+    def invite(trial_id: Key, body: Invitations):
+        with store.transaction(write=True) as db:
+            trial = registry.get_trial(db, trial_id)
+            return recruitment.invite(db, trial, body.invitations, body.expected_version)
+
+    @app.get("/trials/{trial_id}/invitations")
+    def read_invitations(trial_id: Key):
+        with store.transaction() as db:
+            registry.get_trial(db, trial_id)
+            return {"invitations": [item.payload()
+                                    for item in recruitment.invitations(db, trial_id)]}
+
+    @app.post("/trials/{trial_id}/invitations/{candidate_id}/accept")
+    def accept_invitation(trial_id: Key, candidate_id: Key, body: AcceptInvitation):
+        with store.transaction(write=True) as db:
+            trial = registry.get_trial(db, trial_id)
+            return recruitment.accept(db, trial, candidate_id, body.accepted_on)
+
+    @app.post("/trials/{trial_id}/invitations/{candidate_id}/withdraw")
+    def withdraw_invitation(trial_id: Key, candidate_id: Key, body: WithdrawInvitation):
+        with store.transaction(write=True) as db:
+            trial = registry.get_trial(db, trial_id)
+            return recruitment.withdraw(db, trial, candidate_id, body.note)
+
+    @app.get("/trials/{trial_id}/recruitment")
+    def recruitment_readout(trial_id: Key):
+        with store.transaction() as db:
+            trial = registry.get_trial(db, trial_id)
+            return recruitment.recruitment_readout(db, trial)
 
     @app.post("/trials/{trial_id}/open")
     def start(trial_id: Key, body: AdvancePhase):

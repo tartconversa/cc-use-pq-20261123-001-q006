@@ -149,8 +149,12 @@ class ApiCase(unittest.TestCase):
             "desk": desk, "assessment": assessment, "reviewer": reviewer, "note": "Field review",
         }, status=status)
 
-    def issue(self, evidence_id, *, outcome="advance", edition=0, status=200, note="Pilot disposition"):
-        return self.call("POST", MAIN + "/bulletins", {
+    def issue(self, evidence_id, *, outcome="advance", edition=0, status=200,
+              note="Pilot disposition", scope="full"):
+        body = {
             "evidence_id": evidence_id, "expected_edition": edition,
             "outcome": outcome, "note": note,
-        }, status=status)
+        }
+        if scope != "full":
+            body["scope"] = scope
+        return self.call("POST", MAIN + "/bulletins", body, status=status)

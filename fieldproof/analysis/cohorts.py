@@ -6,11 +6,9 @@ from datetime import date
 from fractions import Fraction
 from typing import Iterable
 
-from fieldproof.design.contracts import Enrollment, Policy, enrolled_days
+from fieldproof.design.contracts import ARMS, Enrollment, Policy, enrolled_days
 from fieldproof.design.registry import Roster, Trial
 from fieldproof.signals.cycles import Cycle
-
-ARMS = ("standard", "assisted")
 
 
 @dataclass
@@ -21,6 +19,7 @@ class UnitSummary:
     cell: str
     arm: str
     enrolled_days: int
+    channel: str | None = None
     cycles: Counter[str] = field(default_factory=Counter)
     energy_issues: Counter[str] = field(default_factory=Counter)
     integrity_issues: Counter[str] = field(default_factory=Counter)
@@ -77,6 +76,7 @@ class UnitSummary:
             "market": self.market,
             "cell": self.cell,
             "arm": self.arm,
+            "channel": self.channel,
             "enrolled_days": self.enrolled_days,
             "cycle_states": dict(sorted(self.cycles.items())),
             "integrity_issues": dict(sorted(self.integrity_issues.items())),
@@ -116,7 +116,7 @@ def summarize(
             continue
         market, cell = roster.placement(unit)
         summaries[unit.unit_id] = UnitSummary(
-            unit.unit_id, unit.site_id, market, cell, unit.arm, days
+            unit.unit_id, unit.site_id, market, cell, unit.arm, days, unit.channel_id
         )
     for cycle in cycles:
         row = summaries.get(cycle.unit_id)
@@ -170,4 +170,13 @@ def by_placement(units: Iterable[UnitSummary]) -> dict[tuple[str, str, str], lis
     cells = defaultdict(list)
     for unit in units:
         cells[unit.market, unit.cell, unit.arm].append(unit)
+    return cells
+
+
+def by_channel(
+    units: Iterable[UnitSummary],
+) -> dict[tuple[str, str, str | None, str], list[UnitSummary]]:
+    cells = defaultdict(list)
+    for unit in units:
+        cells[unit.market, unit.cell, unit.channel, unit.arm].append(unit)
     return cells

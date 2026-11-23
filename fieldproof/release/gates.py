@@ -36,9 +36,7 @@ def in_basis_points(number: Fraction | None) -> Fraction | None:
     return number * 10_000 if number is not None else None
 
 
-def energy_gate(estimate: MarketEstimate, policy: Policy) -> Gate:
-    standard = estimate.standard["energy_wh"]
-    assisted = estimate.assisted["energy_wh"]
+def energy_gate(standard: Fraction | None, assisted: Fraction | None, policy: Policy) -> Gate:
     allowed = policy.max_energy_increase_bp
     if standard is None or assisted is None:
         return Gate("energy_change_bp", "unavailable", boundary=allowed, direction="at_most")
@@ -55,21 +53,24 @@ def energy_gate(estimate: MarketEstimate, policy: Policy) -> Gate:
     )
 
 
-def assess(estimate: MarketEstimate, policy: Policy) -> dict:
-    integrity = estimate.integrity()
-    manual = estimate.delta("manual")
+def assess(
+    estimate: MarketEstimate, policy: Policy, scope: str = "full"
+) -> dict:
+    standard, assisted = estimate.vectors(scope)
+    integrity = estimate.integrity(scope)
+    manual = estimate.delta("manual", scope)
     unresolved = integrity["unresolved_units"]
-    coverage = not any(cell.gaps for cell in estimate.cells)
+    coverage = estimate.coverage_ok(scope)
     gates = [
         Gate("planned_cell_coverage", "pass" if coverage else "unavailable"),
         threshold("units_with_unresolved_cycles", unresolved, 0, "at_most"),
-        threshold("alarm_increase_bp", in_basis_points(estimate.delta("alarm")),
+        threshold("alarm_increase_bp", in_basis_points(estimate.delta("alarm", scope)),
                   policy.max_alarm_increase_bp, "at_most"),
-        threshold("failure_increase_bp", in_basis_points(estimate.delta("failure")),
+        threshold("failure_increase_bp", in_basis_points(estimate.delta("failure", scope)),
                   policy.max_failure_increase_bp, "at_most"),
         threshold("manual_saving_bp", in_basis_points(-manual if manual is not None else None),
                   policy.min_manual_saving_bp, "at_least"),
-        energy_gate(estimate, policy),
+        energy_gate(standard["energy_wh"], assisted["energy_wh"], policy),
     ]
     if any(gate.state == "fail" and gate.name != "units_with_unresolved_cycles" for gate in gates):
         recommendation = "hold"

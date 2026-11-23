@@ -54,7 +54,7 @@ def analyze(trial: Trial, material: Material) -> dict:
     policy = trial.plan.policy
     markets = []
     for market in estimate(trial, material.units):
-        markets.append({**market.payload(), **assess(market, policy)})
+        markets.append(market_result(market, policy))
     relevant = [
         cycle.payload()
         for cycle in material.cycles
@@ -70,12 +70,51 @@ def analyze(trial: Trial, material: Material) -> dict:
         "window": material.window.payload(),
         "policy": policy.model_dump(),
         "roster_digest": fingerprint([
-            (row.unit_id, row.site_id, row.market, row.cell, row.arm, row.enrolled_days)
+            (row.unit_id, row.site_id, row.market, row.cell, row.arm, row.channel, row.enrolled_days)
             for row in material.units.values()
         ]),
         "facts_digest": fingerprint(relevant),
         "unit_digest": fingerprint(units),
         "market_results": markets,
+    }
+
+
+def market_result(market, policy) -> dict:
+    payload = market.payload()
+    coverage = payload["target_coverage"]
+    channels = any(entry.channel is not None for entry in market.entries)
+    full = assess(market, policy, "full")
+    restricted = assess(market, policy, "restricted") if channels else None
+    full_available = market.scope == "full"
+    restricted_available = bool(channels) and market.scope == "restricted"
+    if full_available:
+        published, scope = full, "full"
+    elif restricted_available:
+        published, scope = restricted, "restricted"
+    else:
+        published, scope = full, market.scope
+    options = {
+        "full": {
+            "available": full_available,
+            "supported_weight_bp": coverage["total_weight_bp"],
+            "recommendation": full["recommendation"],
+            "gates": full["gates"],
+            "blocked_by": full["blocked_by"],
+        }
+    }
+    if channels:
+        options["restricted"] = {
+            "available": restricted_available,
+            "supported_weight_bp": coverage["supported_weight_bp"],
+            "recommendation": restricted["recommendation"],
+            "gates": restricted["gates"],
+            "blocked_by": restricted["blocked_by"],
+        }
+    return {
+        **payload,
+        **published,
+        "scope": scope,
+        "scope_options": options,
     }
 
 

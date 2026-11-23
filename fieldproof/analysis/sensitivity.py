@@ -57,6 +57,26 @@ def range_verdict(bound: Interval, limit_bp: int, direction: str) -> str:
     return "depends_on_unqualified_units"
 
 
+def _channel_unknown(estimate: MarketEstimate, scopes) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    for cell_key, channel, weight, arms, _ in scopes:
+        bucket = grouped.setdefault(cell_key, {"cell": cell_key, "channels": {}})
+        unknown = {}
+        for arm, summary in arms.items():
+            missing = len(summary.recruited) - len(summary.eligible)
+            unknown[arm] = {
+                "unqualified_units": missing,
+                "has_no_enrollment": not summary.recruited,
+                "market_weight_exposed_bp": display(
+                    weight * (Fraction(missing, len(summary.recruited))
+                              if summary.recruited else 1),
+                    RATE_SCALE,
+                ),
+            }
+        bucket["channels"][channel or ""] = unknown
+    return [grouped[key] for key in sorted(grouped)]
+
+
 def range_readout(estimate: MarketEstimate, policy: Policy) -> dict:
     scores = {
         "manual": (policy.min_manual_saving_bp, "at_least"),
@@ -68,24 +88,38 @@ def range_readout(estimate: MarketEstimate, policy: Policy) -> dict:
         for name in RATES
     }
     missing_by_cell = []
-    for cell in estimate.cells:
-        unknown = {}
-        weight = Fraction(cell.weight_bp, RATE_SCALE)
-        for arm, summary in cell.arms.items():
-            missing = len(summary.recruited) - len(summary.eligible)
-            unknown[arm] = {
-                "unqualified_units": missing,
-                "has_no_enrollment": not summary.recruited,
-                "market_weight_exposed_bp": display(
-                    weight * (Fraction(missing, len(summary.recruited))
-                              if summary.recruited else 1),
-                    RATE_SCALE,
-                ),
-            }
+    channelled = any(entry.channel is not None for entry in estimate.entries)
+    if channelled:
+        scopes = [
+            (entry.cell, entry.channel, entry.weight_bp, entry.arms, entry.required_units)
+            for entry in estimate.entries
+        ]
+        missing_by_cell = _channel_unknown(estimate, scopes)
+    else:
+        scopes = [
+            (cell.key, None, Fraction(cell.weight_bp, RATE_SCALE), cell.arms,
+             policy.required_units_per_arm)
+            for cell in estimate.cells
+        ]
+    for cell_key, channel, weight, arms, _ in scopes:
+        if not channelled:
+            unknown = {}
+            for arm, summary in arms.items():
+                missing = len(summary.recruited) - len(summary.eligible)
+                unknown[arm] = {
+                    "unqualified_units": missing,
+                    "has_no_enrollment": not summary.recruited,
+                    "market_weight_exposed_bp": display(
+                        weight * (Fraction(missing, len(summary.recruited))
+                                  if summary.recruited else 1),
+                        RATE_SCALE,
+                    ),
+                }
+            missing_by_cell.append({"cell": cell_key, "arms": unknown})
+        for arm, summary in arms.items():
             for name in RATES:
                 contribution = population_interval(summary, name).weighted(weight)
                 market_ranges[name][arm] = market_ranges[name][arm].add(contribution)
-        missing_by_cell.append({"cell": cell.key, "arms": unknown})
     metrics = {}
     for name, arms in market_ranges.items():
         left, right = (

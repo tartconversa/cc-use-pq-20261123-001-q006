@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fieldproof.analysis.cohorts import UnitSummary, by_placement
+from fieldproof.analysis.cohorts import UnitSummary
 from fieldproof.analysis.contrast import METRICS, MarketEstimate, assess_cells, display
 from fieldproof.analysis.evidence import Material
 from fieldproof.common import missing
@@ -31,13 +31,13 @@ def removals(units: list[UnitSummary]):
 
 
 def estimate_remaining(market: Market, policy: Policy, removal: Removal) -> MarketEstimate:
-    cells = assess_cells(market, by_placement(removal.remaining), policy)
-    return MarketEstimate.build(market, cells)
+    cells = assess_cells(market, removal.remaining, policy)
+    return MarketEstimate.build(market, cells, policy)
 
 
 def describe_effect(full: MarketEstimate, removed: MarketEstimate, metric: str) -> dict:
-    baseline = full.delta(metric)
-    other = removed.delta(metric)
+    baseline = full.delta(metric, full.scope)
+    other = removed.delta(metric, removed.scope)
     scale = 10_000 if metric in {"manual", "alarm", "failure"} else 1
     return {
         "full_effect": display(baseline, scale),
@@ -64,8 +64,8 @@ def site_readout(trial: Trial, material: Material, market_id: str) -> dict:
         raise missing("market", market_id)
     units = [unit for unit in material.units.values() if unit.market == market_id]
     policy = trial.plan.policy
-    full = MarketEstimate.build(market, assess_cells(market, by_placement(units), policy))
-    full_gates = assess(full, policy)
+    full = MarketEstimate.build(market, assess_cells(market, units, policy), policy)
+    full_gates = assess(full, policy, full.scope)
     rows = [
         omission_row(market, policy, full, full_gates, removal)
         for removal in removals(units)
@@ -75,6 +75,7 @@ def site_readout(trial: Trial, material: Material, market_id: str) -> dict:
         "cut": material.cut,
         "window": material.window.payload(),
         "full_recommendation": full_gates["recommendation"],
+        "full_scope": full.scope,
         "sites_with_recommendation_change": [
             row["site_id"] for row in rows
             if row["remaining_recommendation"] != full_gates["recommendation"]
@@ -85,7 +86,7 @@ def site_readout(trial: Trial, material: Material, market_id: str) -> dict:
 
 def omission_row(market, policy, full, full_gates, removal: Removal):
     remaining = estimate_remaining(market, policy, removal)
-    remaining_gates = assess(remaining, policy)
+    remaining_gates = assess(remaining, policy, remaining.scope)
     cells = []
     for cell in remaining.cells:
         gaps = cell.gaps
@@ -100,6 +101,7 @@ def omission_row(market, policy, full, full_gates, removal: Removal):
         "site_id": removal.site_id,
         "removed_units": len(removal.units),
         "remaining_units": len(removal.remaining),
+        "remaining_scope": remaining.scope,
         "remaining_recommendation": remaining_gates["recommendation"],
         "cells": cells,
         "metrics": {
